@@ -401,6 +401,7 @@ initAuth();
 function navConfig(){
   if(STATE.isAdmin){
     return [
+      { id:'calendar', label:'Calendar', icon:ICON.calendar },
       { id:'clients', label:'Clients', icon:ICON.users },
       { id:'library', label:'Library', icon:ICON.dumbbell },
       { id:'chat', label:'Messages', icon:ICON.chat },
@@ -486,6 +487,7 @@ function navigate(view){
     settings: renderSettings,
     clients: renderClients,
     inbox: renderInbox,
+    calendar: renderCalendarView,
   };
   if(renderers[view]) renderers[view]();
 }
@@ -510,21 +512,228 @@ async function loadExercises(){
 }
 
 async function fetchClientBundle(clientId){
-  const [bodyStats, orms, sessions] = await Promise.all([
+  const [bodyStats, orms, sessions, appointments] = await Promise.all([
     sb.from('body_stats').select('*').eq('client_id', clientId).order('logged_at', { ascending:false }),
     sb.from('one_rep_maxes').select('*').eq('client_id', clientId).order('achieved_on', { ascending:false }),
     sb.from('sessions').select('*, session_exercises(*, exercises(*))').eq('client_id', clientId).order('scheduled_date', { ascending:false, nullsFirst:false }),
+    sb.from('appointments').select('*').eq('client_id', clientId).order('scheduled_date', { ascending:false }),
   ]);
   return {
     bodyStats: bodyStats.data || [],
     orms: orms.data || [],
     sessions: (sessions.data || []).map(s => ({ ...s, session_exercises: (s.session_exercises||[]).sort((a,b)=>a.order_index-b.order_index) })),
+    appointments: appointments.data || [],
   };
 }
 
 async function fetchClientProfile(clientId){
   const { data } = await sb.from('profiles').select('*').eq('id', clientId).maybeSingle();
   return data;
+}
+
+// ============================================================================
+// CALENDAR — Sab's main calendar of check-ins/calls across all clients, plus
+// a shared month-grid used again inside each client's own Calendar tab.
+// ============================================================================
+
+let calState = { year: new Date().getFullYear(), month: new Date().getMonth() };
+let clientCalState = { year: new Date().getFullYear(), month: new Date().getMonth() };
+
+function shiftMonth(state, delta){
+  let m = state.month + delta, y = state.year;
+  if(m < 0){ m = 11; y--; }
+  if(m > 11){ m = 0; y++; }
+  state.month = m; state.year = y;
+}
+
+function monthGridHtml(year, month, byDate){
+  const first = new Date(year, month, 1);
+  const startOffset = first.getDay();
+  const daysInMonth = new Date(year, month+1, 0).getDate();
+  const todayStr = new Date().toISOString().slice(0,10);
+  let cells = '';
+  for(let i=0; i<startOffset; i++) cells += `<div class="cal-cell empty"></div>`;
+  for(let d=1; d<=daysInMonth; d++){
+    const dateStr = `${year}-${String(month+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    const items = byDate[dateStr] || [];
+    cells += `
+      <div class="cal-cell ${dateStr===todayStr?'today':''} ${items.length?'has-items':''}" data-date="${dateStr}">
+        <div class="cal-daynum">${d}</div>
+        <div class="cal-chips">
+          ${items.slice(0,3).map(it => `<div class="cal-chip ${it.colorClass}">${escapeHtml(it.label)}</div>`).join('')}
+          ${items.length > 3 ? `<div class="cal-more">+${items.length-3} more</div>` : ''}
+        </div>
+      </div>`;
+  }
+  const dow = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  return `
+    <div class="cal-dow-row">${dow.map(d=>`<div>${d}</div>`).join('')}</div>
+    <div class="cal-grid">${cells}</div>
+  `;
+}
+
+function bindCalendarGrid(container, byDate, onDayClick){
+  $$('.cal-cell[data-date]', container).forEach(cell => {
+    cell.addEventListener('click', () => onDayClick(cell.dataset.date));
+  });
+}
+
+async function renderCalendarView(){
+  const el = $('#view-calendar');
+  el.innerHTML = `<div class="skeleton" style="height:420px;"></div>`;
+  if(!STATE.clients.length) await loadClients();
+  const { year, month } = calState;
+  const monthStart = new Date(year, month, 1);
+  const startStr = monthStart.toISOString().slice(0,10);
+  const endStr = new Date(year, month+1, 0).toISOString().slice(0,10);
+
+  const { data, error } = await sb.from('appointments').select('*, profiles(full_name)')
+    .gte('scheduled_date', startStr).lte('scheduled_date', endStr)
+    .order('scheduled_time', { ascending:true, nullsFirst:false });
+  if(error){ el.innerHTML = `<div class="empty-state"><h3>Could not load the calendar</h3><p>${escapeHtml(error.message)}</p></div>`; return; }
+
+  const byDate = {};
+  (data || []).forEach(a => {
+    const label = (a.profiles ? a.profiles.full_name.split(' ')[0] : 'Client') + (a.scheduled_time ? ' ' + a.scheduled_time.slice(0,5) : '');
+    (byDate[a.scheduled_date] ||= []).push({ label, colorClass: a.type === 'phone_call' ? 'chip-call' : 'chip-checkin', raw: a, kind: 'appointment' });
+  });
+
+  el.innerHTML = `
+    <div class="page-head">
+      <div><div class="eyebrow">Schedule</div><h1>Calendar</h1></div>
+      <button class="btn btn-gold" id="add-appt-btn">${ICON.plus} Schedule check-in / call</button>
+    </div>
+    <div class="cal-nav">
+      <button class="btn btn-outline btn-sm" id="cal-prev-btn">${ICON.chevronLeft}</button>
+      <h3 class="cal-title">${monthStart.toLocaleDateString('en-AU',{ month:'long', year:'numeric' })}</h3>
+      <button class="btn btn-outline btn-sm" id="cal-next-btn" style="transform:scaleX(-1);">${ICON.chevronLeft}</button>
+      <button class="btn btn-ghost btn-sm" id="cal-today-btn">Today</button>
+    </div>
+    <div id="cal-grid-wrap"></div>
+    <div class="cal-legend"><span><i class="dot chip-checkin"></i>Check-in</span><span><i class="dot chip-call"></i>Phone call</span></div>
+  `;
+  $('#cal-grid-wrap').innerHTML = monthGridHtml(year, month, byDate);
+  bindCalendarGrid($('#cal-grid-wrap'), byDate, (dateStr) => openDayModal(dateStr, byDate[dateStr] || [], null));
+  $('#add-appt-btn').addEventListener('click', () => openAppointmentModal(null, null, null));
+  $('#cal-prev-btn').addEventListener('click', () => { shiftMonth(calState, -1); renderCalendarView(); });
+  $('#cal-next-btn').addEventListener('click', () => { shiftMonth(calState, 1); renderCalendarView(); });
+  $('#cal-today-btn').addEventListener('click', () => { const n = new Date(); calState.year = n.getFullYear(); calState.month = n.getMonth(); renderCalendarView(); });
+}
+
+function openDayModal(dateStr, items, forcedClientId){
+  openModal(`
+    <div class="modal-head"><h3>${fmtDateShort(dateStr)}</h3><button class="modal-close" onclick="closeModal()">${ICON.x}</button></div>
+    <div id="day-items">
+      ${items.length ? items.map(dayItemRowHtml).join('') : `<p class="text-muted" style="font-size:14px;">Nothing scheduled this day.</p>`}
+    </div>
+    <button class="btn btn-gold btn-block" style="margin-top:16px;" id="day-add-appt-btn">${ICON.plus} Schedule for this day</button>
+  `);
+  $('#day-add-appt-btn').addEventListener('click', () => { closeModal(); openAppointmentModal(null, dateStr, forcedClientId); });
+  $$('.mark-appt-done').forEach(b => b.addEventListener('click', () => updateAppointmentStatus(b.dataset.id, 'completed')));
+  $$('.cancel-appt').forEach(b => b.addEventListener('click', () => updateAppointmentStatus(b.dataset.id, 'cancelled')));
+  $$('.delete-appt').forEach(b => b.addEventListener('click', () => deleteAppointment(b.dataset.id)));
+  $$('.edit-appt').forEach(b => {
+    const it = items.find(i => i.raw.id === b.dataset.id);
+    if(it) b.addEventListener('click', () => { closeModal(); openAppointmentModal(it.raw, null, forcedClientId); });
+  });
+}
+
+function dayItemRowHtml(it){
+  if(it.kind === 'session'){
+    const s = it.raw;
+    const badgeClass = s.status === 'upcoming' ? 'badge-upcoming' : s.status === 'completed' ? 'badge-completed' : 'badge-missed';
+    return `
+      <div class="day-item">
+        <div class="day-item-head"><strong>${escapeHtml(s.title)}</strong><span class="badge ${badgeClass}">${s.status}</span></div>
+        <div class="hint">Programmed session</div>
+      </div>`;
+  }
+  const a = it.raw;
+  const badgeClass = a.status === 'completed' ? 'badge-completed' : a.status === 'cancelled' ? 'badge-missed' : 'badge-upcoming';
+  return `
+    <div class="day-item">
+      <div class="day-item-head">
+        <strong>${a.type === 'phone_call' ? 'Phone call' : 'Check-in'}${a.profiles ? ' · ' + escapeHtml(a.profiles.full_name) : ''}</strong>
+        <span class="badge ${badgeClass}">${a.status}</span>
+      </div>
+      <div class="hint">${a.scheduled_time ? a.scheduled_time.slice(0,5) + ' · ' : ''}${a.duration_minutes || 30} min${a.notes ? ' · ' + escapeHtml(a.notes) : ''}</div>
+      <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap;">
+        <button class="btn btn-outline btn-sm edit-appt" data-id="${a.id}">Edit</button>
+        ${a.status === 'scheduled' ? `<button class="btn btn-outline btn-sm mark-appt-done" data-id="${a.id}">Mark done</button><button class="btn btn-ghost btn-sm cancel-appt" data-id="${a.id}">Cancel</button>` : ''}
+        <button class="btn btn-ghost btn-sm delete-appt" data-id="${a.id}" style="color:var(--danger);">Delete</button>
+      </div>
+    </div>`;
+}
+
+function openAppointmentModal(existing, prefillDate, forcedClientId){
+  const isEdit = !!existing;
+  const clientOptions = STATE.clients.map(c => `<option value="${c.id}" ${(existing && existing.client_id===c.id) || forcedClientId===c.id ? 'selected' : ''}>${escapeHtml(c.full_name)}</option>`).join('');
+  openModal(`
+    <div class="modal-head"><h3>${isEdit ? 'Edit' : 'Schedule'} check-in / call</h3><button class="modal-close" onclick="closeModal()">${ICON.x}</button></div>
+    <div class="field"><label>Client</label><select id="ap-client" ${forcedClientId ? 'disabled' : ''}>${clientOptions}</select></div>
+    <div class="field"><label>Type</label>
+      <select id="ap-type">
+        <option value="check_in" ${existing && existing.type==='check_in' ? 'selected' : ''}>Check-in</option>
+        <option value="phone_call" ${existing && existing.type==='phone_call' ? 'selected' : ''}>Phone call</option>
+      </select>
+    </div>
+    <div class="grid grid-2">
+      <div class="field"><label>Date</label><input type="date" id="ap-date" value="${existing ? existing.scheduled_date : (prefillDate || new Date().toISOString().slice(0,10))}"/></div>
+      <div class="field"><label>Time (optional)</label><input type="time" id="ap-time" value="${existing && existing.scheduled_time ? existing.scheduled_time.slice(0,5) : ''}"/></div>
+    </div>
+    <div class="field"><label>Duration (minutes)</label><input type="number" id="ap-duration" value="${existing ? existing.duration_minutes : 30}"/></div>
+    <div class="field"><label>Notes</label><textarea id="ap-notes">${existing ? escapeHtml(existing.notes||'') : ''}</textarea></div>
+    <div id="ap-error" class="error-text" style="display:none;"></div>
+    <button class="btn btn-gold btn-block" id="ap-save-btn">${isEdit ? 'Save changes' : 'Schedule'}</button>
+  `);
+  $('#ap-save-btn').addEventListener('click', async () => {
+    const clientId = forcedClientId || $('#ap-client').value;
+    if(!clientId){ $('#ap-error').textContent = 'Choose a client.'; $('#ap-error').style.display = 'block'; return; }
+    const type = $('#ap-type').value;
+    const payload = {
+      client_id: clientId,
+      type,
+      title: type === 'phone_call' ? 'Phone call' : 'Check-in',
+      scheduled_date: $('#ap-date').value,
+      scheduled_time: $('#ap-time').value || null,
+      duration_minutes: parseInt($('#ap-duration').value) || 30,
+      notes: $('#ap-notes').value.trim(),
+    };
+    const btn = $('#ap-save-btn'); setLoading(btn, true);
+    let error;
+    if(isEdit){
+      ({ error } = await sb.from('appointments').update(payload).eq('id', existing.id));
+    } else {
+      ({ error } = await sb.from('appointments').insert(payload));
+    }
+    setLoading(btn, false, isEdit ? 'Save changes' : 'Schedule');
+    if(error){ $('#ap-error').textContent = error.message; $('#ap-error').style.display = 'block'; return; }
+    closeModal();
+    toast(isEdit ? 'Updated.' : 'Scheduled.', 'success');
+    refreshAfterAppointmentChange();
+  });
+}
+
+async function updateAppointmentStatus(id, status){
+  const { error } = await sb.from('appointments').update({ status }).eq('id', id);
+  if(error){ toast('Could not update that.', 'error'); return; }
+  toast('Updated.', 'success');
+  closeModal();
+  refreshAfterAppointmentChange();
+}
+
+async function deleteAppointment(id){
+  if(!confirm('Delete this appointment?')) return;
+  const { error } = await sb.from('appointments').delete().eq('id', id);
+  if(error){ toast('Could not delete this appointment.', 'error'); return; }
+  toast('Deleted.', 'success');
+  closeModal();
+  refreshAfterAppointmentChange();
+}
+
+function refreshAfterAppointmentChange(){
+  if(STATE.currentView === 'calendar') renderCalendarView();
+  if(STATE.currentView === 'clients' && clientsDetailId) renderClients();
 }
 
 // ============================================================================
@@ -546,6 +755,11 @@ async function renderDashboard(){
   bundle.orms.forEach(o => { if(!topLifts[o.lift_name] || o.weight_kg > topLifts[o.lift_name].weight_kg) topLifts[o.lift_name] = o; });
   const liftList = Object.values(topLifts).slice(0,3);
 
+  const todayStr = new Date().toISOString().slice(0,10);
+  const nextAppt = bundle.appointments
+    .filter(a => a.status === 'scheduled' && a.scheduled_date >= todayStr)
+    .sort((a,b) => new Date(a.scheduled_date + 'T' + (a.scheduled_time||'00:00')) - new Date(b.scheduled_date + 'T' + (b.scheduled_time||'00:00')))[0];
+
   const sparkPoints = bundle.bodyStats.slice(0,8).reverse().filter(b=>b.weight_kg);
   const sparkSvg = sparkline(sparkPoints.map(p=>p.weight_kg));
 
@@ -557,7 +771,7 @@ async function renderDashboard(){
       </div>
     </div>
 
-    <div class="grid grid-3" style="margin-bottom:22px;">
+    <div class="grid grid-4" style="margin-bottom:22px;">
       <div class="card stat-card">
         <div class="eyebrow">Current weight</div>
         <div class="val">${latestWeight && latestWeight.weight_kg ? latestWeight.weight_kg + ' kg' : '—'}</div>
@@ -569,6 +783,11 @@ async function renderDashboard(){
         <div class="val" style="font-size:20px;">${next ? escapeHtml(next.title) : 'Nothing scheduled'}</div>
         <div class="sub">${next ? sessionDateLabel(next) : 'Sab will program your next session soon'}</div>
         ${next ? `<button class="btn btn-outline btn-sm" style="margin-top:14px;" onclick="navigate('sessions')">View session</button>` : ''}
+      </div>
+      <div class="card stat-card">
+        <div class="eyebrow">Next with Sab</div>
+        <div class="val" style="font-size:20px;">${nextAppt ? (nextAppt.type === 'phone_call' ? 'Phone call' : 'Check-in') : 'Nothing booked'}</div>
+        <div class="sub">${nextAppt ? sessionDateLabel({scheduled_date: nextAppt.scheduled_date}) + (nextAppt.scheduled_time ? ' · ' + nextAppt.scheduled_time.slice(0,5) : '') : 'Sab will book your next one soon'}</div>
       </div>
       <div class="card stat-card">
         <div class="eyebrow">Sessions completed</div>
@@ -1607,6 +1826,7 @@ async function renderClientDetail(clientId){
     </div>
     <div class="tabs">
       <button class="tab-btn" data-ctab="overview">Overview</button>
+      <button class="tab-btn" data-ctab="calendar">Calendar</button>
       <button class="tab-btn" data-ctab="program">Program</button>
       <button class="tab-btn" data-ctab="stats">Body stats</button>
       <button class="tab-btn" data-ctab="lifts">One-rep maxes</button>
@@ -1644,6 +1864,34 @@ function renderClientDetailPanel(client, bundle){
         ${Object.values(topLifts).length ? Object.values(topLifts).map((l,i) => `<div style="display:flex;justify-content:space-between;padding:9px 0;${i>0?'border-top:1px solid var(--border-soft);':''}"><span>${escapeHtml(l.lift_name)}</span><span class="mono" style="color:var(--gold);">${l.weight_kg} kg</span></div>`).join('') : `<p class="text-muted" style="font-size:14px;">None logged yet.</p>`}
       </div>
     `;
+  }
+  if(clientsDetailTab === 'calendar'){
+    const { year, month } = clientCalState;
+    const monthStart = new Date(year, month, 1);
+    const byDate = {};
+    bundle.sessions.forEach(s => {
+      if(!s.scheduled_date) return;
+      (byDate[s.scheduled_date] ||= []).push({ label: s.title, colorClass: 'chip-session', raw: s, kind: 'session' });
+    });
+    bundle.appointments.forEach(a => {
+      const label = (a.type === 'phone_call' ? 'Call' : 'Check-in') + (a.scheduled_time ? ' ' + a.scheduled_time.slice(0,5) : '');
+      (byDate[a.scheduled_date] ||= []).push({ label, colorClass: a.type === 'phone_call' ? 'chip-call' : 'chip-checkin', raw: a, kind: 'appointment' });
+    });
+    panel.innerHTML = `
+      <div class="cal-nav">
+        <button class="btn btn-outline btn-sm" id="ccal-prev-btn">${ICON.chevronLeft}</button>
+        <h3 class="cal-title">${monthStart.toLocaleDateString('en-AU',{ month:'long', year:'numeric' })}</h3>
+        <button class="btn btn-outline btn-sm" id="ccal-next-btn" style="transform:scaleX(-1);">${ICON.chevronLeft}</button>
+        <button class="btn btn-gold btn-sm" id="ccal-add-btn" style="margin-left:auto;">${ICON.plus} Schedule check-in / call</button>
+      </div>
+      <div id="ccal-grid-wrap"></div>
+      <div class="cal-legend"><span><i class="dot chip-session"></i>Programmed session</span><span><i class="dot chip-checkin"></i>Check-in</span><span><i class="dot chip-call"></i>Phone call</span></div>
+    `;
+    $('#ccal-grid-wrap').innerHTML = monthGridHtml(year, month, byDate);
+    bindCalendarGrid($('#ccal-grid-wrap'), byDate, (dateStr) => openDayModal(dateStr, byDate[dateStr] || [], client.id));
+    $('#ccal-prev-btn').addEventListener('click', () => { shiftMonth(clientCalState, -1); renderClientDetailPanel(client, bundle); });
+    $('#ccal-next-btn').addEventListener('click', () => { shiftMonth(clientCalState, 1); renderClientDetailPanel(client, bundle); });
+    $('#ccal-add-btn').addEventListener('click', () => openAppointmentModal(null, null, client.id));
   }
   if(clientsDetailTab === 'program'){
     panel.innerHTML = `
