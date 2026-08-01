@@ -1172,7 +1172,7 @@ async function openCameraCapture(){
   openModal(`
     <div class="modal-head"><h3>Camera</h3><button class="modal-close" id="camera-close-btn">${ICON.x}</button></div>
     <div style="position:relative;background:#000;border-radius:14px;overflow:hidden;min-height:240px;display:flex;align-items:center;justify-content:center;">
-      <video id="camera-preview" autoplay playsinline muted style="width:100%;max-height:56vh;object-fit:cover;display:block;"></video>
+      <video id="camera-preview" autoplay playsinline muted style="width:100%;max-height:56vh;max-height:56dvh;object-fit:cover;display:block;"></video>
       <div id="camera-rec-badge" style="display:none;position:absolute;top:12px;left:12px;background:rgba(0,0,0,0.55);color:#f2635c;padding:5px 12px;border-radius:999px;font-size:12px;font-weight:600;align-items:center;gap:6px;">
         <span style="width:8px;height:8px;border-radius:50%;background:#f2635c;display:inline-block;animation:pulse 1s infinite;"></span>REC
       </div>
