@@ -668,5 +668,34 @@ h1,h2,h3,h4{ font-family: var(--font-display); font-weight:600; letter-spacing:0
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="app.js"></script>
+<script>
+// Service worker: keeps the home-screen app fresh automatically. When a new
+// version is uploaded to GitHub, the next time the app is opened (or comes
+// back into focus) it detects the change, activates it, and reloads itself
+// once — so there's nothing for Sab or a client to manually update.
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').then((registration) => {
+      // Re-check for a new version whenever the app regains focus — this is
+      // what catches an update on a phone that's been sitting on the home
+      // screen since before you last uploaded a change.
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') registration.update();
+      });
+      window.addEventListener('focus', () => registration.update());
+    }).catch(() => {});
+  });
+
+  // Reload exactly once, automatically, the moment a new service worker
+  // takes control of the page — this is what makes an update "just appear"
+  // instead of requiring a manual refresh.
+  let hasReloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hasReloaded) return;
+    hasReloaded = true;
+    window.location.reload();
+  });
+}
+</script>
 </body>
 </html>
