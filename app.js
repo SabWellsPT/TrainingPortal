@@ -1034,7 +1034,7 @@ async function renderLibrary(){
   el.innerHTML = `
     <div class="page-head">
       <div><div class="eyebrow">Reference</div><h1>Exercise library</h1></div>
-      ${STATE.isAdmin ? `<button class="btn btn-gold" id="add-exercise-btn">${ICON.plus} Add exercise</button>` : ''}
+      ${STATE.isStaff ? `<button class="btn btn-gold" id="add-exercise-btn">${ICON.plus} Add exercise</button>` : ''}
     </div>
     <div class="filter-bar">
       <input id="lib-search" placeholder="Search exercises..." value="${escapeHtml(libraryFilters.search)}"/>
@@ -1046,7 +1046,7 @@ async function renderLibrary(){
   $('#lib-search').addEventListener('input', (e) => { libraryFilters.search = e.target.value; renderLibraryGrid(); });
   $('#lib-category').addEventListener('change', (e) => { libraryFilters.category = e.target.value; renderLibraryGrid(); });
   $('#lib-muscle').addEventListener('change', (e) => { libraryFilters.muscle = e.target.value; renderLibraryGrid(); });
-  if(STATE.isAdmin) $('#add-exercise-btn').addEventListener('click', () => openExerciseEditor(null));
+  if(STATE.isStaff) $('#add-exercise-btn').addEventListener('click', () => openExerciseEditor(null));
   renderLibraryGrid();
 }
 
@@ -1088,9 +1088,9 @@ function openExerciseDetail(id){
     <div class="tags" style="margin-bottom:16px;"><span class="tag">${escapeHtml(ex.category)}</span><span class="tag">${escapeHtml(ex.muscle_group)}</span><span class="tag">${escapeHtml(ex.difficulty)}</span>${ex.equipment ? `<span class="tag">${escapeHtml(ex.equipment)}</span>` : ''}</div>
     ${ex.description ? `<p style="font-size:14.5px;color:var(--text-muted);line-height:1.6;margin-bottom:12px;">${escapeHtml(ex.description)}</p>` : ''}
     ${ex.coaching_cues ? `<div style="background:var(--bg-elevated);border-radius:10px;padding:14px;"><strong style="font-size:13px;color:var(--gold);">Coaching cues</strong><p style="font-size:13.5px;color:var(--text-muted);margin-top:6px;line-height:1.6;">${escapeHtml(ex.coaching_cues)}</p></div>` : ''}
-    ${STATE.isAdmin ? `<div style="display:flex;gap:10px;margin-top:18px;"><button class="btn btn-outline" id="edit-ex-btn">Edit</button><button class="btn btn-danger" id="delete-ex-btn">Delete</button></div>` : ''}
+    ${STATE.isStaff ? `<div style="display:flex;gap:10px;margin-top:18px;"><button class="btn btn-outline" id="edit-ex-btn">Edit</button><button class="btn btn-danger" id="delete-ex-btn">Delete</button></div>` : ''}
   `);
-  if(STATE.isAdmin){
+  if(STATE.isStaff){
     $('#edit-ex-btn').addEventListener('click', () => openExerciseEditor(ex));
     $('#delete-ex-btn').addEventListener('click', async () => {
       if(!confirm(`Delete "${ex.name}" from the library? This can't be undone.`)) return;
