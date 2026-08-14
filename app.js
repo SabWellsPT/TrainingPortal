@@ -264,8 +264,9 @@ async function enterApp(){
     await loadClientDirectory();
   }
   await loadExercises();
-  navigate(STATE.isAdmin ? 'clients' : (STATE.isAssistant ? 'calendar' : 'dashboard'));
+  navigate((STATE.isAdmin || STATE.isAssistant) ? 'calendar' : 'dashboard');
   subscribeMessages();
+  computeInitialUnread();
 }
 
 function showLanding(){
@@ -467,7 +468,7 @@ function renderNavItems(container, items, withLabelBlock){
     <button class="nav-item" data-view="${it.id}">
       ${it.icon}<span>${it.label}</span>
       ${it.id === 'inbox' ? '<span class="dot" id="inbox-dot" style="display:none;"></span>' : ''}
-      ${it.id === 'chat' && !STATE.isAdmin ? '<span class="dot" id="chat-dot" style="display:none;"></span>' : ''}
+      ${it.id === 'chat' ? '<span class="dot" id="chat-dot" style="display:none;"></span>' : ''}
     </button>
   `).join('');
   $$('button[data-view]', container).forEach(btn => {
@@ -615,6 +616,41 @@ function bindCalendarGrid(container, byDate, onDayClick){
   });
 }
 
+async function fetchTodayItemsForStaff(){
+  const todayStr = new Date().toISOString().slice(0,10);
+  if(STATE.isAdmin){
+    const [apptRes, sessRes] = await Promise.all([
+      sb.from('appointments').select('*').eq('scheduled_date', todayStr).order('scheduled_time', { ascending:true, nullsFirst:false }),
+      sb.from('sessions').select('id, client_id, title, status').eq('scheduled_date', todayStr),
+    ]);
+    const appts = (apptRes.data || []).map(a => ({ time: a.scheduled_time, label: (a.type === 'phone_call' ? 'Call' : 'Check-in') + ' · ' + clientNameFromDirectory(a.client_id), sub: a.notes || '' }));
+    const sessions = (sessRes.data || []).map(s => ({ time: null, label: s.title + ' · ' + clientNameFromDirectory(s.client_id), sub: 'Programmed session' }));
+    return [...appts, ...sessions].sort((a,b) => (a.time || '99:99').localeCompare(b.time || '99:99'));
+  }
+  // Assistants only ever see appointments here — no session/program detail,
+  // consistent with the confidentiality boundary everywhere else.
+  const { data } = await sb.from('appointments').select('*').eq('scheduled_date', todayStr).order('scheduled_time', { ascending:true, nullsFirst:false });
+  return (data || []).map(a => ({ time: a.scheduled_time, label: (a.type === 'phone_call' ? 'Call' : 'Check-in') + ' · ' + clientNameFromDirectory(a.client_id), sub: a.notes || '' }));
+}
+
+function todayWidgetHtml(items){
+  const todayLabel = new Date().toLocaleDateString('en-AU', { weekday:'long', day:'numeric', month:'long' });
+  return `
+    <div class="card" style="margin-bottom:22px;">
+      <div class="eyebrow" style="margin-bottom:12px;">Today · ${todayLabel}</div>
+      ${items.length ? items.map((it,i) => `
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 0;${i>0?'border-top:1px solid var(--border-soft);':''}">
+          <div style="min-width:0;">
+            <div style="font-size:14.5px;font-weight:600;">${escapeHtml(it.label)}</div>
+            ${it.sub ? `<div class="hint">${escapeHtml(it.sub)}</div>` : ''}
+          </div>
+          ${it.time ? `<span class="mono" style="color:var(--gold);font-size:13px;flex-shrink:0;">${it.time.slice(0,5)}</span>` : ''}
+        </div>
+      `).join('') : `<p class="text-muted" style="font-size:14px;">Nothing on the books today.</p>`}
+    </div>
+  `;
+}
+
 async function renderCalendarView(){
   const el = $('#view-calendar');
   el.innerHTML = `<div class="skeleton" style="height:420px;"></div>`;
@@ -636,11 +672,14 @@ async function renderCalendarView(){
     (byDate[a.scheduled_date] ||= []).push({ label, colorClass: a.type === 'phone_call' ? 'chip-call' : 'chip-checkin', raw: a, kind: 'appointment' });
   });
 
+  const todayItems = await fetchTodayItemsForStaff();
+
   el.innerHTML = `
     <div class="page-head">
       <div><div class="eyebrow">Schedule</div><h1>Calendar</h1></div>
       <button class="btn btn-gold" id="add-appt-btn">${ICON.plus} Schedule check-in / call</button>
     </div>
+    ${todayWidgetHtml(todayItems)}
     <div class="cal-nav">
       <button class="btn btn-outline btn-sm" id="cal-prev-btn">${ICON.chevronLeft}</button>
       <h3 class="cal-title">${monthStart.toLocaleDateString('en-AU',{ month:'long', year:'numeric' })}</h3>
@@ -801,6 +840,11 @@ async function renderDashboard(){
   const sparkPoints = bundle.bodyStats.slice(0,8).reverse().filter(b=>b.weight_kg);
   const sparkSvg = sparkline(sparkPoints.map(p=>p.weight_kg));
 
+  const todayItems = [
+    ...bundle.sessions.filter(s => s.scheduled_date === todayStr).map(s => ({ time:null, label:s.title, sub:'Programmed session' })),
+    ...bundle.appointments.filter(a => a.scheduled_date === todayStr).map(a => ({ time:a.scheduled_time, label:(a.type==='phone_call'?'Phone call':'Check-in')+' with Sab', sub:a.notes||'' })),
+  ].sort((a,b) => (a.time || '99:99').localeCompare(b.time || '99:99'));
+
   el.innerHTML = `
     <div class="page-head">
       <div>
@@ -808,6 +852,8 @@ async function renderDashboard(){
         <h1>${escapeHtml(STATE.profile.full_name.split(' ')[0])}'s dashboard</h1>
       </div>
     </div>
+
+    ${todayWidgetHtml(todayItems)}
 
     <div class="grid grid-4" style="margin-bottom:22px;">
       <div class="card stat-card">
@@ -1206,7 +1252,33 @@ function subscribeMessages(){
 
 function updateNavDots(){
   const chatDot = $('#chat-dot');
-  if(chatDot) chatDot.style.display = STATE.clientHasUnread ? 'block' : 'none';
+  if(!chatDot) return;
+  const hasUnread = STATE.isAdmin ? STATE.unreadThreads.size > 0 : STATE.clientHasUnread;
+  chatDot.style.display = hasUnread ? 'block' : 'none';
+}
+
+// Run once on login so a badge shows up immediately for messages that
+// arrived while the app was closed — the realtime listener alone only
+// catches messages sent while the app is open.
+async function computeInitialUnread(){
+  if(STATE.isAdmin){
+    const { data } = await sb.from('messages').select('client_id').neq('sender_id', STATE.profile.id).is('read_at', null);
+    STATE.unreadThreads = new Set((data || []).map(m => m.client_id));
+  } else {
+    const { data } = await sb.from('messages').select('id').eq('client_id', STATE.profile.id).neq('sender_id', STATE.profile.id).is('read_at', null).limit(1);
+    STATE.clientHasUnread = !!(data && data.length);
+  }
+  updateNavDots();
+}
+
+// Marks every message in a thread not sent by me as read, and clears the
+// matching unread indicators. Safe to call every time a thread is opened.
+async function markThreadRead(clientId){
+  await sb.from('messages').update({ read_at: new Date().toISOString() })
+    .eq('client_id', clientId).neq('sender_id', STATE.profile.id).is('read_at', null);
+  if(STATE.isAdmin){ STATE.unreadThreads.delete(clientId); }
+  else { STATE.clientHasUnread = false; }
+  updateNavDots();
 }
 
 async function renderChat(){
@@ -1261,6 +1333,7 @@ function renderChatThreadsList(){
     item.addEventListener('click', async () => {
       STATE.chatThreadClientId = item.dataset.clientId;
       STATE.unreadThreads.delete(item.dataset.clientId);
+      updateNavDots();
       $('#chat-layout').classList.add('thread-open');
       renderChatThreadsList();
       await openThread(STATE.chatThreadClientId);
@@ -1274,6 +1347,7 @@ async function openThread(clientId){
   const client = STATE.isAdmin ? (STATE.clients.find(c => c.id === clientId) || STATE.assistants.find(a => a.id === clientId)) : STATE.profile;
   const { data } = await sb.from('messages').select('*').eq('client_id', clientId).order('created_at');
   STATE.messagesCache[clientId] = data || [];
+  markThreadRead(clientId);
 
   main.innerHTML = `
     <div class="chat-head">
