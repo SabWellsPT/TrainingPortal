@@ -58,6 +58,8 @@ const STATE = {
   recordedChunks: [],
   recordingStream: null,
   pendingAttachment: null, // { file, type } queued for next chat send
+  notifications: [],
+  notificationsChannel: null,
 };
 
 // ---- 3. ICONS (inline SVG, currentColor) -------------------------------------
@@ -85,6 +87,7 @@ const ICON = {
   flip: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l4 4-4 4"/><path d="M3 11V9a4 4 0 014-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v2a4 4 0 01-4 4H3"/></svg>`,
   recordDot: `<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="8"/></svg>`,
   key: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>`,
+  bell: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>`,
 };
 
 // ---- 4. UTILITIES ------------------------------------------------------------
@@ -266,7 +269,9 @@ async function enterApp(){
   await loadExercises();
   navigate((STATE.isAdmin || STATE.isAssistant) ? 'calendar' : 'dashboard');
   subscribeMessages();
+  subscribeNotifications();
   computeInitialUnread();
+  loadNotifications();
 }
 
 function showLanding(){
@@ -402,6 +407,20 @@ function speakToSabsModal(){
 }
 $('#speak-to-sabs-btn').addEventListener('click', speakToSabsModal);
 $('#speak-to-sabs-btn-2').addEventListener('click', speakToSabsModal);
+$('#topbar-notif-btn').addEventListener('click', openNotificationsPanel);
+
+document.addEventListener('visibilitychange', () => {
+  if(document.visibilityState === 'visible' && STATE.profile){
+    loadNotifications();
+    computeInitialUnread();
+  }
+});
+window.addEventListener('focus', () => {
+  if(STATE.profile){
+    loadNotifications();
+    computeInitialUnread();
+  }
+});
 
 initAuth();
 
@@ -447,6 +466,7 @@ function buildSidebar(){
     </div>
     <div id="sidebar-nav-items"></div>
     <div class="sidebar-footer">
+      <button class="nav-item" id="sidebar-notif-btn">${ICON.bell}<span>Notifications</span><span class="dot" id="notif-dot" style="display:none;"></span></button>
       <div class="mini-profile" id="sidebar-profile-btn"></div>
       <button class="nav-item" id="sidebar-logout-btn" style="margin-top:6px;">${ICON.logout}<span>Log out</span></button>
     </div>
@@ -454,6 +474,7 @@ function buildSidebar(){
   renderNavItems($('#sidebar-nav-items'), items, true);
   $('#sidebar-logout-btn').addEventListener('click', logout);
   $('#sidebar-profile-btn').addEventListener('click', () => navigate('settings'));
+  $('#sidebar-notif-btn').addEventListener('click', openNotificationsPanel);
 }
 
 function buildBottomNav(){
@@ -1248,6 +1269,96 @@ function subscribeMessages(){
       }
     })
     .subscribe();
+}
+
+// ============================================================================
+// NOTIFICATIONS — backed entirely by the notifications table + its database
+// triggers (see schema.sql). This app just reads what the database already
+// decided to notify this person about; it never has to work out relevance
+// itself, which is what makes this reliable across every role.
+// ============================================================================
+
+async function loadNotifications(){
+  const { data, error } = await sb.from('notifications').select('*').order('created_at', { ascending:false }).limit(30);
+  if(error) return;
+  STATE.notifications = data || [];
+  updateNotifDot();
+}
+
+function updateNotifDot(){
+  const hasUnread = STATE.notifications.some(n => !n.read_at);
+  ['notif-dot','notif-dot-mobile'].forEach(id => {
+    const el = $('#'+id);
+    if(el) el.style.display = hasUnread ? 'block' : 'none';
+  });
+}
+
+function subscribeNotifications(){
+  if(STATE.notificationsChannel) sb.removeChannel(STATE.notificationsChannel);
+  STATE.notificationsChannel = sb.channel('notifications-realtime')
+    .on('postgres_changes', { event:'INSERT', schema:'public', table:'notifications', filter:`recipient_id=eq.${STATE.profile.id}` }, (payload) => {
+      STATE.notifications.unshift(payload.new);
+      updateNotifDot();
+    })
+    .subscribe();
+}
+
+function notifIcon(type){
+  if(type === 'message') return ICON.chat;
+  if(type === 'appointment_scheduled' || type === 'session_reminder') return ICON.calendar;
+  return ICON.dumbbell;
+}
+
+function openNotificationsPanel(){
+  openModal(`
+    <div class="modal-head"><h3>Notifications</h3><button class="modal-close" onclick="closeModal()">${ICON.x}</button></div>
+    ${STATE.notifications.some(n=>!n.read_at) ? `<button class="btn btn-ghost btn-sm" id="mark-all-read-btn" style="padding-left:0;margin-bottom:6px;">Mark all as read</button>` : ''}
+    <div id="notif-list">
+      ${STATE.notifications.length ? STATE.notifications.map(n => `
+        <div class="day-item notif-row ${!n.read_at ? 'unread' : ''}" data-id="${n.id}" data-view="${n.link_view||''}" data-link-id="${n.link_id||''}" style="cursor:pointer;display:flex;gap:12px;align-items:flex-start;">
+          <div class="avatar" style="width:34px;height:34px;flex-shrink:0;color:var(--gold);">${notifIcon(n.type)}</div>
+          <div style="flex:1;min-width:0;">
+            <div style="font-size:14px;font-weight:600;">${escapeHtml(n.title)}${!n.read_at ? ' <span style="color:var(--gold);">●</span>' : ''}</div>
+            ${n.body ? `<div class="hint">${escapeHtml(n.body)}</div>` : ''}
+            <div class="hint">${timeAgo(n.created_at)}</div>
+          </div>
+        </div>
+      `).join('') : `<div class="empty-state"><h3>Nothing yet</h3><p>New messages, scheduled check-ins and calls, and new sessions will show up here.</p></div>`}
+    </div>
+  `);
+  const markAllBtn = $('#mark-all-read-btn');
+  if(markAllBtn) markAllBtn.addEventListener('click', markAllNotificationsRead);
+  $$('.notif-row').forEach(row => {
+    row.addEventListener('click', () => handleNotificationClick(row.dataset.id, row.dataset.view, row.dataset.linkId));
+  });
+}
+
+async function markAllNotificationsRead(){
+  const unreadIds = STATE.notifications.filter(n => !n.read_at).map(n => n.id);
+  if(!unreadIds.length) return;
+  await sb.from('notifications').update({ read_at: new Date().toISOString() }).in('id', unreadIds);
+  STATE.notifications.forEach(n => { if(!n.read_at) n.read_at = new Date().toISOString(); });
+  updateNotifDot();
+  closeModal();
+  openNotificationsPanel();
+}
+
+async function handleNotificationClick(id, linkView, linkId){
+  const n = STATE.notifications.find(x => x.id === id);
+  if(n && !n.read_at){
+    n.read_at = new Date().toISOString();
+    await sb.from('notifications').update({ read_at: n.read_at }).eq('id', id);
+    updateNotifDot();
+  }
+  closeModal();
+  if(linkView === 'chat'){
+    if(STATE.isAdmin) STATE.chatThreadClientId = linkId;
+    navigate('chat');
+  } else if(linkView === 'calendar'){
+    navigate(STATE.isStaff ? 'calendar' : 'dashboard');
+  } else if(linkView === 'sessions'){
+    navigate('sessions');
+  }
 }
 
 function updateNavDots(){

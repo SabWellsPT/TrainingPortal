@@ -366,6 +366,10 @@ h1,h2,h3,h4{ font-family: var(--font-display); font-weight:600; letter-spacing:0
 .chat-composer textarea{ flex:1; background: var(--bg-elevated); border:1px solid var(--border); color:var(--text); border-radius: 20px; padding: 11px 16px; resize:none; max-height:120px; font-family:var(--font-body); font-size:14.5px; }
 .chat-composer textarea:focus{ outline:none; border-color: var(--gold); }
 .icon-btn{ width:42px; height:42px; border-radius:50%; border:1px solid var(--border); background: var(--bg-elevated); color: var(--text-muted); display:flex; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0; }
+#topbar-notif-btn{ width:38px; height:38px; }
+#topbar-notif-btn svg{ width:19px; height:19px; }
+#notif-dot-mobile{ width:8px; height:8px; border-radius:50%; background: var(--danger); }
+.notif-row.unread{ background: var(--bg-elevated); border-radius: 10px; margin: 0 -10px; padding: 12px 10px !important; }
 .icon-btn:hover{ color: var(--gold); border-color: var(--gold); }
 .icon-btn svg{ width:19px; height:19px; }
 .icon-btn.send{ background: var(--gold); color:#181305; border-color: transparent; }
@@ -647,7 +651,13 @@ h1,h2,h3,h4{ font-family: var(--font-display); font-weight:600; letter-spacing:0
           </svg>
           <div class="name" style="font-size:14px;">Sab Wells PT</div>
         </div>
-        <div class="mini-profile" id="topbar-profile-btn" style="padding:4px;"></div>
+        <div style="display:flex;align-items:center;gap:4px;">
+          <button class="icon-btn" id="topbar-notif-btn" style="position:relative;border:none;background:none;">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
+            <span class="dot" id="notif-dot-mobile" style="display:none;position:absolute;top:6px;right:6px;"></span>
+          </button>
+          <div class="mini-profile" id="topbar-profile-btn" style="padding:4px;"></div>
+        </div>
       </div>
 
       <div class="view-wrap">
