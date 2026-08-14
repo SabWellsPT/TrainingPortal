@@ -43,9 +43,13 @@ const STATE = {
   user: null,           // auth user object
   profile: null,        // profiles row for the logged-in person
   isAdmin: false,
+  isAssistant: false,
+  isStaff: false,
   currentView: 'dashboard',
   exercises: [],         // full library, cached
   clients: [],           // admin only: all client profiles
+  assistants: [],         // admin only: all assistant profiles
+  clientDirectory: [],    // staff (admin+assistant): id+full_name only, confidentiality-safe
   adminSelectedClientId: null, // which client the admin is currently viewing/programming
   chatThreadClientId: null,    // which client's thread is open in Chat view
   messagesChannel: null,
@@ -228,6 +232,8 @@ async function handleLoggedIn(user){
   }
   STATE.profile = profile;
   STATE.isAdmin = profile.role === 'admin';
+  STATE.isAssistant = profile.role === 'assistant';
+  STATE.isStaff = STATE.isAdmin || STATE.isAssistant;
 
   if(profile.is_active === false){
     await sb.auth.signOut();
@@ -252,9 +258,13 @@ async function enterApp(){
   updateProfileWidgets();
   if(STATE.isAdmin){
     await loadClients();
+    await loadAssistants();
+  }
+  if(STATE.isStaff){
+    await loadClientDirectory();
   }
   await loadExercises();
-  navigate(STATE.isAdmin ? 'clients' : 'dashboard');
+  navigate(STATE.isAdmin ? 'clients' : (STATE.isAssistant ? 'calendar' : 'dashboard'));
   subscribeMessages();
 }
 
@@ -409,6 +419,14 @@ function navConfig(){
       { id:'settings', label:'Settings', icon:ICON.settings },
     ];
   }
+  if(STATE.isAssistant){
+    return [
+      { id:'calendar', label:'Calendar', icon:ICON.calendar },
+      { id:'library', label:'Library', icon:ICON.dumbbell },
+      { id:'chat', label:'Messages', icon:ICON.chat },
+      { id:'settings', label:'Settings', icon:ICON.settings },
+    ];
+  }
   return [
     { id:'dashboard', label:'Dashboard', icon:ICON.home },
     { id:'sessions', label:'Sessions', icon:ICON.calendar },
@@ -505,6 +523,25 @@ async function loadClients(){
   }
 }
 
+async function loadAssistants(){
+  const { data, error } = await sb.from('profiles').select('*').eq('role','assistant').order('full_name');
+  if(error){ return; }
+  STATE.assistants = data || [];
+}
+
+// Name-only lookup, safe for the assistant role — see the client_names view
+// in schema.sql for why this never exposes anything beyond id + full_name.
+async function loadClientDirectory(){
+  const { data, error } = await sb.from('client_names').select('*').order('full_name');
+  if(error){ return; }
+  STATE.clientDirectory = data || [];
+}
+
+function clientNameFromDirectory(clientId){
+  const found = STATE.clientDirectory.find(c => c.id === clientId);
+  return found ? found.full_name : 'Client';
+}
+
 async function loadExercises(){
   const { data, error } = await sb.from('exercises').select('*').order('name');
   if(error){ toast('Could not load the exercise library.', 'error'); return; }
@@ -581,20 +618,21 @@ function bindCalendarGrid(container, byDate, onDayClick){
 async function renderCalendarView(){
   const el = $('#view-calendar');
   el.innerHTML = `<div class="skeleton" style="height:420px;"></div>`;
-  if(!STATE.clients.length) await loadClients();
+  if(STATE.isAdmin && !STATE.clients.length) await loadClients();
+  if(!STATE.clientDirectory.length) await loadClientDirectory();
   const { year, month } = calState;
   const monthStart = new Date(year, month, 1);
   const startStr = monthStart.toISOString().slice(0,10);
   const endStr = new Date(year, month+1, 0).toISOString().slice(0,10);
 
-  const { data, error } = await sb.from('appointments').select('*, profiles(full_name)')
+  const { data, error } = await sb.from('appointments').select('*')
     .gte('scheduled_date', startStr).lte('scheduled_date', endStr)
     .order('scheduled_time', { ascending:true, nullsFirst:false });
   if(error){ el.innerHTML = `<div class="empty-state"><h3>Could not load the calendar</h3><p>${escapeHtml(error.message)}</p></div>`; return; }
 
   const byDate = {};
   (data || []).forEach(a => {
-    const label = (a.profiles ? a.profiles.full_name.split(' ')[0] : 'Client') + (a.scheduled_time ? ' ' + a.scheduled_time.slice(0,5) : '');
+    const label = clientNameFromDirectory(a.client_id).split(' ')[0] + (a.scheduled_time ? ' ' + a.scheduled_time.slice(0,5) : '');
     (byDate[a.scheduled_date] ||= []).push({ label, colorClass: a.type === 'phone_call' ? 'chip-call' : 'chip-checkin', raw: a, kind: 'appointment' });
   });
 
@@ -653,7 +691,7 @@ function dayItemRowHtml(it){
   return `
     <div class="day-item">
       <div class="day-item-head">
-        <strong>${a.type === 'phone_call' ? 'Phone call' : 'Check-in'}${a.profiles ? ' · ' + escapeHtml(a.profiles.full_name) : ''}</strong>
+        <strong>${a.type === 'phone_call' ? 'Phone call' : 'Check-in'} · ${escapeHtml(clientNameFromDirectory(a.client_id))}</strong>
         <span class="badge ${badgeClass}">${a.status}</span>
       </div>
       <div class="hint">${a.scheduled_time ? a.scheduled_time.slice(0,5) + ' · ' : ''}${a.duration_minutes || 30} min${a.notes ? ' · ' + escapeHtml(a.notes) : ''}</div>
@@ -667,7 +705,7 @@ function dayItemRowHtml(it){
 
 function openAppointmentModal(existing, prefillDate, forcedClientId){
   const isEdit = !!existing;
-  const clientOptions = STATE.clients.map(c => `<option value="${c.id}" ${(existing && existing.client_id===c.id) || forcedClientId===c.id ? 'selected' : ''}>${escapeHtml(c.full_name)}</option>`).join('');
+  const clientOptions = STATE.clientDirectory.map(c => `<option value="${c.id}" ${(existing && existing.client_id===c.id) || forcedClientId===c.id ? 'selected' : ''}>${escapeHtml(c.full_name)}</option>`).join('');
   openModal(`
     <div class="modal-head"><h3>${isEdit ? 'Edit' : 'Schedule'} check-in / call</h3><button class="modal-close" onclick="closeModal()">${ICON.x}</button></div>
     <div class="field"><label>Client</label><select id="ap-client" ${forcedClientId ? 'disabled' : ''}>${clientOptions}</select></div>
@@ -1200,7 +1238,11 @@ async function renderChat(){
 function renderChatThreadsList(){
   const wrap = $('#chat-threads');
   if(!wrap) return;
-  wrap.innerHTML = STATE.clients.map(c => {
+  const threads = [
+    ...STATE.assistants.map(a => ({ ...a, _isAssistant: true })),
+    ...STATE.clients,
+  ];
+  wrap.innerHTML = threads.map(c => {
     const cache = STATE.messagesCache[c.id];
     const last = cache && cache.length ? cache[cache.length-1] : null;
     const unread = STATE.unreadThreads.has(c.id);
@@ -1208,7 +1250,7 @@ function renderChatThreadsList(){
       <div class="chat-thread-item ${STATE.chatThreadClientId===c.id?'active':''}" data-client-id="${c.id}">
         <div class="avatar">${c.avatar_url ? `<img src="${c.avatar_url}">` : initials(c.full_name)}</div>
         <div style="flex:1;min-width:0;">
-          <div class="name">${escapeHtml(c.full_name)}</div>
+          <div class="name">${escapeHtml(c.full_name)}${c._isAssistant ? ' <span class="tag" style="margin-left:4px;">Assistant</span>' : ''}</div>
           <div class="preview">${last ? escapeHtml((last.content || (last.attachment_type==='video'?'Sent a video':'Sent a photo')).slice(0,40)) : 'No messages yet'}</div>
         </div>
         ${unread ? '<span style="width:8px;height:8px;border-radius:50%;background:var(--danger);flex-shrink:0;"></span>' : ''}
@@ -1229,7 +1271,7 @@ function renderChatThreadsList(){
 async function openThread(clientId){
   const main = $('#chat-main');
   main.innerHTML = `<div style="padding:20px;"><div class="skeleton" style="height:60px;"></div></div>`;
-  const client = STATE.isAdmin ? STATE.clients.find(c => c.id === clientId) : STATE.profile;
+  const client = STATE.isAdmin ? (STATE.clients.find(c => c.id === clientId) || STATE.assistants.find(a => a.id === clientId)) : STATE.profile;
   const { data } = await sb.from('messages').select('*').eq('client_id', clientId).order('created_at');
   STATE.messagesCache[clientId] = data || [];
 
@@ -1489,13 +1531,14 @@ async function renderSettings(){
   const el = $('#view-settings');
   const p = STATE.profile;
   let bundle = { bodyStats:[], orms:[] };
-  if(!STATE.isAdmin) bundle = await fetchClientBundle(p.id);
+  if(!STATE.isStaff) bundle = await fetchClientBundle(p.id);
 
   el.innerHTML = `
     <div class="page-head"><div><div class="eyebrow">Account</div><h1>Settings</h1></div></div>
     <div class="tabs">
       <button class="tab-btn active" data-stab="profile">Profile</button>
-      ${!STATE.isAdmin ? '<button class="tab-btn" data-stab="stats">Body stats</button><button class="tab-btn" data-stab="lifts">One-rep maxes</button>' : ''}
+      ${!STATE.isStaff ? '<button class="tab-btn" data-stab="stats">Body stats</button><button class="tab-btn" data-stab="lifts">One-rep maxes</button>' : ''}
+      ${STATE.isAdmin ? '<button class="tab-btn" data-stab="team">Team</button>' : ''}
       <button class="tab-btn" data-stab="password">Password</button>
     </div>
     <div id="settings-panel"></div>
@@ -1526,7 +1569,7 @@ function renderSettingsPanel(tab, bundle){
         </div>
         <div class="field"><label>Full name</label><input id="settings-name" value="${escapeHtml(p.full_name)}"/></div>
         <div class="field"><label>Phone</label><input id="settings-phone" value="${escapeHtml(p.phone||'')}"/></div>
-        ${!STATE.isAdmin ? `<div class="field"><label>Height (cm)</label><input type="number" id="settings-height" value="${p.height_cm||''}"/></div>
+        ${!STATE.isStaff ? `<div class="field"><label>Height (cm)</label><input type="number" id="settings-height" value="${p.height_cm||''}"/></div>
         <div class="field"><label>Training goals</label><textarea id="settings-goals">${escapeHtml(p.goals||'')}</textarea></div>` : ''}
         <button class="btn btn-gold" id="save-profile-btn">Save changes</button>
       </div>
@@ -1546,7 +1589,7 @@ function renderSettingsPanel(tab, bundle){
     $('#save-profile-btn').addEventListener('click', async () => {
       const btn = $('#save-profile-btn'); setLoading(btn, true);
       const payload = { full_name: $('#settings-name').value.trim(), phone: $('#settings-phone').value.trim() };
-      if(!STATE.isAdmin){ payload.height_cm = parseFloat($('#settings-height').value) || null; payload.goals = $('#settings-goals').value.trim(); }
+      if(!STATE.isStaff){ payload.height_cm = parseFloat($('#settings-height').value) || null; payload.goals = $('#settings-goals').value.trim(); }
       const { error } = await sb.from('profiles').update(payload).eq('id', p.id);
       setLoading(btn, false, 'Save changes');
       if(error){ toast('Could not save changes.', 'error'); return; }
@@ -1577,6 +1620,18 @@ function renderSettingsPanel(tab, bundle){
       toast('Password updated.', 'success');
       $('#np1').value=''; $('#np2').value='';
     });
+  }
+
+  if(tab === 'team'){
+    panel.innerHTML = `
+      <div class="page-head" style="margin-bottom:16px;">
+        <div><p class="text-muted" style="font-size:13.5px;max-width:520px;">Assistants can manage the exercise library and the calendar, and can message you directly — they can never see any client's profile, stats, lifts, sessions or messages.</p></div>
+        <button class="btn btn-gold btn-sm" id="add-assistant-btn">${ICON.plus} Add assistant</button>
+      </div>
+      <div id="team-list"></div>
+    `;
+    $('#add-assistant-btn').addEventListener('click', openAddAssistantModal);
+    renderTeamList();
   }
 
   if(tab === 'stats'){
@@ -1808,6 +1863,102 @@ function openAddClientModal(){
   });
 }
 
+// ============================================================================
+// TEAM (admin) — manage assistant accounts. Reuses toggleClientActive,
+// confirmDeleteClient and openResetPasswordModal from the Clients section
+// below, since those already work generically on any profile row.
+// ============================================================================
+
+function renderTeamList(){
+  const wrap = $('#team-list');
+  if(!STATE.assistants.length){
+    wrap.innerHTML = `<div class="empty-state"><h3>No assistants yet</h3><p>Add one to share the exercise library and calendar workload without giving them access to client information.</p></div>`;
+    return;
+  }
+  wrap.innerHTML = STATE.assistants.map(a => `
+    <div class="card client-row" style="margin-bottom:10px;cursor:default;">
+      <div class="avatar" style="width:44px;height:44px;">${a.avatar_url ? `<img src="${a.avatar_url}">` : initials(a.full_name)}</div>
+      <div class="flex1">
+        <div class="name">${escapeHtml(a.full_name)}</div>
+        <div class="goal">${escapeHtml(a.email||'')}</div>
+      </div>
+      ${a.is_active === false ? '<span class="badge badge-missed">Access paused</span>' : (a.must_change_password ? '<span class="badge badge-new">Pending first login</span>' : '')}
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:-4px 0 16px;">
+      <button class="btn btn-outline btn-sm ta-message" data-id="${a.id}">${ICON.chat} Message</button>
+      <button class="btn btn-outline btn-sm ta-reset" data-id="${a.id}">Reset password</button>
+      <button class="btn btn-outline btn-sm ta-toggle" data-id="${a.id}">${a.is_active === false ? 'Re-enable access' : 'Disable access'}</button>
+      <button class="btn btn-danger btn-sm ta-delete" data-id="${a.id}">${ICON.trash} Delete</button>
+    </div>
+  `).join('');
+  STATE.assistants.forEach(a => {
+    const messageBtn = wrap.querySelector(`.ta-message[data-id="${a.id}"]`);
+    if(messageBtn) messageBtn.addEventListener('click', () => { STATE.chatThreadClientId = a.id; navigate('chat'); });
+    const resetBtn = wrap.querySelector(`.ta-reset[data-id="${a.id}"]`);
+    if(resetBtn) resetBtn.addEventListener('click', () => openResetPasswordModal(a));
+    const toggleBtn = wrap.querySelector(`.ta-toggle[data-id="${a.id}"]`);
+    if(toggleBtn) toggleBtn.addEventListener('click', () => toggleClientActive(a, async () => { await loadAssistants(); renderTeamList(); }));
+    const deleteBtn = wrap.querySelector(`.ta-delete[data-id="${a.id}"]`);
+    if(deleteBtn) deleteBtn.addEventListener('click', () => confirmDeleteClient(a, async () => { await loadAssistants(); renderTeamList(); }));
+  });
+}
+
+function openAddAssistantModal(){
+  openModal(`
+    <div class="modal-head"><h3>Add an assistant</h3><button class="modal-close" onclick="closeModal()">${ICON.x}</button></div>
+    <p class="text-muted" style="font-size:13.5px;margin-bottom:16px;">This creates their login. They'll manage the exercise library and your calendar, and can message you — they can never see client profiles, stats, sessions or messages. Give them the email and temporary password shown afterwards.</p>
+    <div class="field"><label>Full name</label><input id="aa-name" required/></div>
+    <div class="field"><label>Email</label><input type="email" id="aa-email" required/></div>
+    <div class="field"><label>Phone (optional)</label><input id="aa-phone"/></div>
+    <div id="aa-error" class="error-text" style="display:none;"></div>
+    <button class="btn btn-gold btn-block" id="aa-submit-btn">Create assistant account</button>
+  `);
+  $('#aa-submit-btn').addEventListener('click', async () => {
+    const name = $('#aa-name').value.trim();
+    const email = $('#aa-email').value.trim();
+    const phone = $('#aa-phone').value.trim();
+    if(!name || !email){ $('#aa-error').textContent='Name and email are required.'; $('#aa-error').style.display='block'; return; }
+    const btn = $('#aa-submit-btn'); setLoading(btn, true);
+
+    const { data: { session: adminSession } } = await sb.auth.getSession();
+    const tempPassword = 'Team' + Math.floor(1000 + Math.random()*9000) + '!';
+
+    const { data: signUpData, error: signUpErr } = await sb.auth.signUp({ email, password: tempPassword });
+    if(signUpErr){
+      setLoading(btn, false, 'Create assistant account');
+      $('#aa-error').textContent = signUpErr.message; $('#aa-error').style.display = 'block';
+      return;
+    }
+    const newUserId = signUpData.user.id;
+    const { error: profileErr } = await sb.from('profiles').insert({
+      id: newUserId, role: 'assistant', full_name: name, email, phone, must_change_password: true,
+    });
+
+    if(adminSession){
+      await sb.auth.setSession({ access_token: adminSession.access_token, refresh_token: adminSession.refresh_token });
+    }
+
+    setLoading(btn, false, 'Create assistant account');
+    if(profileErr){
+      $('#aa-error').textContent = 'Account created but profile setup failed: ' + profileErr.message;
+      $('#aa-error').style.display = 'block';
+      return;
+    }
+    closeModal();
+    await loadAssistants();
+    renderTeamList();
+    openModal(`
+      <div class="modal-head"><h3>Assistant account created</h3><button class="modal-close" onclick="closeModal()">${ICON.x}</button></div>
+      <p style="font-size:14.5px;color:var(--text-muted);margin-bottom:16px;">Send these details to ${escapeHtml(name)} — they'll set their own password on first login.</p>
+      <div class="card mono" style="font-size:14.5px;line-height:2;">
+        Email: ${escapeHtml(email)}<br/>
+        Temporary password: ${tempPassword}
+      </div>
+      <button class="btn btn-gold btn-block" style="margin-top:18px;" onclick="closeModal()">Done</button>
+    `);
+  });
+}
+
 async function renderClientDetail(clientId){
   const el = $('#view-clients');
   el.innerHTML = `<div class="skeleton" style="height:200px;"></div>`;
@@ -2010,7 +2161,7 @@ function openResetPasswordModal(client){
   });
 }
 
-async function toggleClientActive(client){
+async function toggleClientActive(client, onDone){
   const disabling = client.is_active !== false;
   const newValue = !disabling;
   const confirmMsg = disabling
@@ -2020,11 +2171,15 @@ async function toggleClientActive(client){
   const { error } = await sb.from('profiles').update({ is_active: newValue }).eq('id', client.id);
   if(error){ toast('Could not update access: ' + error.message, 'error'); return; }
   toast(disabling ? `${client.full_name}'s access is paused.` : `${client.full_name}'s access is restored.`, 'success');
-  await loadClients();
-  renderClients();
+  if(onDone){
+    await onDone();
+  } else {
+    await loadClients();
+    renderClients();
+  }
 }
 
-function confirmDeleteClient(client){
+function confirmDeleteClient(client, onDone){
   openModal(`
     <div class="modal-head"><h3>Delete ${escapeHtml(client.full_name)}?</h3><button class="modal-close" onclick="closeModal()">${ICON.x}</button></div>
     <p style="font-size:14.5px;color:var(--text-muted);line-height:1.6;margin-bottom:20px;">This permanently removes their profile, programmed sessions, messages, body stats and one-rep maxes. Their login will stop working. This can't be undone.</p>
@@ -2043,9 +2198,13 @@ function confirmDeleteClient(client){
     STATE.unreadThreads.delete(client.id);
     closeModal();
     toast(`${client.full_name} was removed.`, 'success');
-    clientsDetailId = null;
-    await loadClients();
-    renderClients();
+    if(onDone){
+      await onDone();
+    } else {
+      clientsDetailId = null;
+      await loadClients();
+      renderClients();
+    }
   });
 }
 
